@@ -1,0 +1,77 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// OmniFlow Backend — Prisma Schema
+// ─────────────────────────────────────────────────────────────────────────────
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+// ─── Enums ───────────────────────────────────────────────────────────────────
+
+enum MessageSender {
+  USER
+  BOT
+}
+
+// ─── Models ──────────────────────────────────────────────────────────────────
+
+/// Represents a customer / end-user who interacts via WhatsApp or other channels.
+model User {
+  id           String   @id @default(uuid()) @db.Uuid
+  businessId   String   @db.Uuid
+  phoneNumber  String   @unique
+  name         String
+  createdAt    DateTime @default(now())
+  lastActiveAt DateTime @default(now()) @updatedAt
+
+  // Relations
+  conversations   Conversation[]
+  customerProfile CustomerProfile?
+
+  @@map("users")
+}
+
+/// A single message exchange in a conversation thread.
+model Conversation {
+  id        String        @id @default(uuid()) @db.Uuid
+  userId    String        @db.Uuid
+  businessId String       @db.Uuid
+  message   String
+  sender    MessageSender
+  timestamp DateTime      @default(now())
+
+  // AI-enriched metadata (nullable — populated after inference)
+  intent    String?
+  sentiment Float?
+  urgency   Float?
+
+  // Relations
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([businessId])
+  @@index([timestamp])
+  @@map("conversations")
+}
+
+/// Aggregated behavioural profile derived from a user's conversation history.
+model CustomerProfile {
+  userId String @id @db.Uuid
+
+  budgetSensitivity    Float  @default(0.5)
+  buyingFrequency      Float  @default(0.5)
+  preferredProducts    Json   @default("[]")
+  communicationStyle   String @default("neutral")
+  responseSpeed        Float  @default(0.5)
+  lifetimeValue        Float  @default(0)
+  lastUpdated          DateTime @default(now()) @updatedAt
+
+  // Relations
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("customer_profiles")
+}
