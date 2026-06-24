@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+.eggs/
+
+# ML — raw training outputs (the deployed copies live in omniflow-backend/src/ml/)
+ml/models/
+
+# Node / npm
+node_modules/
+npm-debug.log*
+
+# Build output
+dist/
+
+# Environment secrets
+.env
+*.env.local
+
+# OS
+.DS_Store
+Thumbs.db

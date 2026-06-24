@@ -11,19 +11,27 @@ import {
 import prisma from '../models';
 
 // ── Agents ────────────────────────────────────────────────────────────────────
-import { MemoryAgent } from '../agents/memory.agent';
-import { BehaviorAgent } from '../agents/behavior.agent';
-import { DigitalTwinAgent } from '../agents/digitalTwin.agent';
-import { ExecutionAgent } from '../agents/execution.agent';
+import { MemoryAgent }              from '../agents/memory.agent';
+import { BehaviorAgent }            from '../agents/behavior.agent';
+import { DigitalTwinAgent }         from '../agents/digitalTwin.agent';
+import { RevenuePredictionAgent }   from '../agents/revenuePrediction.agent';
+import { SegmentationAgent }        from '../agents/segmentation.agent';
+import { StrategyDecisionAgent }    from '../agents/strategyDecision.agent';
+import { OfferOptimizationAgent }   from '../agents/offerOptimization.agent';
+import { ExecutionAgent }           from '../agents/execution.agent';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Agent singletons — constructed once at module load, services injected here.
 // ─────────────────────────────────────────────────────────────────────────────
 
-const memoryAgent = new MemoryAgent(getConversationHistory, prisma);
-const behaviorAgent = new BehaviorAgent(extractBehavior);
-const digitalTwinAgent = new DigitalTwinAgent(prisma);
-const executionAgent = new ExecutionAgent(generateResponse);
+const memoryAgent            = new MemoryAgent(getConversationHistory, prisma);
+const behaviorAgent          = new BehaviorAgent(extractBehavior);
+const digitalTwinAgent       = new DigitalTwinAgent(prisma);
+const revenuePredictionAgent = new RevenuePredictionAgent(prisma);
+const segmentationAgent      = new SegmentationAgent(prisma);
+const strategyDecisionAgent  = new StrategyDecisionAgent(prisma);
+const offerOptimizationAgent = new OfferOptimizationAgent();
+const executionAgent         = new ExecutionAgent(generateResponse);
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Request body type
@@ -39,10 +47,14 @@ interface MessageBody {
 // handleMessage  — POST /api/v1/message
 //
 // Pipeline order:
-//   1. MemoryAgent       — hydrate history from Redis, persist USER msg to PG
-//   2. BehaviorAgent     — extract intent / sentiment / urgency via OpenAI
-//   3. DigitalTwinAgent  — fetch/update CustomerProfile in Postgres
-//   4. ExecutionAgent    — generate final reply via OpenAI
+//   1. MemoryAgent            — hydrate history from Redis, persist USER msg to PG
+//   2. BehaviorAgent          — extract intent / sentiment / urgency via OpenAI
+//   3. DigitalTwinAgent       — fetch/update CustomerProfile in Postgres
+//   4. RevenuePredictionAgent — ML-based purchase probability + order value (ONNX)
+//   5. SegmentationAgent      — rule-based segment assignment; updates Prediction row
+//   6. StrategyDecisionAgent  — select discount / bundle / follow-up time by segment
+//   7. OfferOptimizationAgent — build headline + copyHint (ephemeral, no DB write)
+//   8. ExecutionAgent         — generate final reply via OpenAI, weaves in offer hint
 // ─────────────────────────────────────────────────────────────────────────────
 
 export async function handleMessage(
@@ -99,7 +111,37 @@ export async function handleMessage(
       'DigitalTwinAgent complete',
     );
 
-    // ── Step 4: ExecutionAgent ──────────────────────────────────────────────
+    // ── Step 4: RevenuePredictionAgent ──────────────────────────────────────
+    reqLog.info('Running RevenuePredictionAgent');
+    state = await revenuePredictionAgent.process(state);
+    reqLog.info(
+      {
+        purchaseProbability: state.predictions?.purchaseProbability,
+        expectedOrderValue:  state.predictions?.expectedOrderValue,
+        ltv:                 state.predictions?.ltv,
+      },
+      'RevenuePredictionAgent complete',
+    );
+
+    // ── Step 5: SegmentationAgent ───────────────────────────────────────────
+    reqLog.info('Running SegmentationAgent');
+    state = await segmentationAgent.process(state);
+    reqLog.info({ segment: state.segment }, 'SegmentationAgent complete');
+
+    // ── Step 6: StrategyDecisionAgent ───────────────────────────────────────
+    reqLog.info('Running StrategyDecisionAgent');
+    state = await strategyDecisionAgent.process(state);
+    reqLog.info(
+      { discount: state.strategy?.discount, bundle: state.strategy?.bundle },
+      'StrategyDecisionAgent complete',
+    );
+
+    // ── Step 7: OfferOptimizationAgent ──────────────────────────────────────
+    reqLog.info('Running OfferOptimizationAgent');
+    state = await offerOptimizationAgent.process(state);
+    reqLog.info({ headline: state.offer?.headline }, 'OfferOptimizationAgent complete');
+
+    // ── Step 8: ExecutionAgent ──────────────────────────────────────────────
     reqLog.info('Running ExecutionAgent');
     state = await executionAgent.process(state);
     reqLog.info({ responseLength: state.response?.length }, 'ExecutionAgent complete');

@@ -31,6 +31,8 @@ model User {
   // Relations
   conversations   Conversation[]
   customerProfile CustomerProfile?
+  predictions     Prediction[]
+  strategies      Strategy[]
 
   @@map("users")
 }
@@ -74,4 +76,42 @@ model CustomerProfile {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@map("customer_profiles")
+}
+
+/// ML-predicted purchase probability and order value for a user at a point in time.
+/// The segment field is initially null and filled by SegmentationAgent.
+model Prediction {
+  id                   String   @id @default(uuid()) @db.Uuid
+  userId               String   @db.Uuid
+  purchaseProbability  Float
+  expectedOrderValue   Float
+  ltv                  Float
+  segment              String?  // filled by SegmentationAgent after creation
+  timestamp            DateTime @default(now())
+
+  // Relations
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([timestamp])
+  @@map("predictions")
+}
+
+/// Strategy recommended for a user based on their segment.
+/// Applied and outcome fields are updated by downstream processes.
+model Strategy {
+  id                String   @id @default(uuid()) @db.Uuid
+  userId            String   @db.Uuid
+  recommendedAction Json     // shape: { discount: number, bundle: string[], reason: string }
+  followUpTime      DateTime?
+  applied           Boolean  @default(false)
+  outcome           String?
+  timestamp         DateTime @default(now())
+
+  // Relations
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([timestamp])
+  @@map("strategies")
 }
