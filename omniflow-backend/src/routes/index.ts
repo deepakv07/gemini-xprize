@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { handleMessage } from '../controllers/message.controller';
 import { listConversations } from '../controllers/conversation.controller';
+import { getDashboardStats } from '../controllers/dashboard.controller';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // /api/v1 router
@@ -21,5 +22,12 @@ router.post('/message', handleMessage);
  */
 router.get('/conversations', listConversations);
 
+/**
+ * GET /api/v1/dashboard/stats
+ * Returns: aggregated business metrics and user segment distributions
+ */
+router.get('/dashboard/stats', getDashboardStats);
+
 export default router;
+
 

@@ -1,41 +1,8 @@
 import { Request, Response, NextFunction } from 'express';
 import logger from '../lib/logger';
 import type { AgentState } from '../types';
-
-// ── Services (imported for injection) ────────────────────────────────────────
-import { extractBehavior, generateResponse } from '../services/openai.service';
-import {
-  getConversationHistory,
-  appendMessage,
-} from '../services/redis.service';
-import prisma from '../models';
-
-// ── Agents ────────────────────────────────────────────────────────────────────
-import { MemoryAgent }              from '../agents/memory.agent';
-import { BehaviorAgent }            from '../agents/behavior.agent';
-import { DigitalTwinAgent }         from '../agents/digitalTwin.agent';
-import { RevenuePredictionAgent }   from '../agents/revenuePrediction.agent';
-import { SegmentationAgent }        from '../agents/segmentation.agent';
-import { StrategyDecisionAgent }    from '../agents/strategyDecision.agent';
-import { OfferOptimizationAgent }   from '../agents/offerOptimization.agent';
-import { ExecutionAgent }           from '../agents/execution.agent';
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Agent singletons — constructed once at module load, services injected here.
-// ─────────────────────────────────────────────────────────────────────────────
-
-const memoryAgent            = new MemoryAgent(getConversationHistory, prisma);
-const behaviorAgent          = new BehaviorAgent(extractBehavior);
-const digitalTwinAgent       = new DigitalTwinAgent(prisma);
-const revenuePredictionAgent = new RevenuePredictionAgent(prisma);
-const segmentationAgent      = new SegmentationAgent(prisma);
-const strategyDecisionAgent  = new StrategyDecisionAgent(prisma);
-const offerOptimizationAgent = new OfferOptimizationAgent();
-const executionAgent         = new ExecutionAgent(generateResponse);
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Request body type
-// ─────────────────────────────────────────────────────────────────────────────
+import { appendMessage } from '../services/redis.service';
+import rabbitmqService from '../services/rabbitmq.service';
 
 interface MessageBody {
   userId: string;
@@ -43,20 +10,12 @@ interface MessageBody {
   message: string;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// handleMessage  — POST /api/v1/message
-//
-// Pipeline order:
-//   1. MemoryAgent            — hydrate history from Redis, persist USER msg to PG
-//   2. BehaviorAgent          — extract intent / sentiment / urgency via OpenAI
-//   3. DigitalTwinAgent       — fetch/update CustomerProfile in Postgres
-//   4. RevenuePredictionAgent — ML-based purchase probability + order value (ONNX)
-//   5. SegmentationAgent      — rule-based segment assignment; updates Prediction row
-//   6. StrategyDecisionAgent  — select discount / bundle / follow-up time by segment
-//   7. OfferOptimizationAgent — build headline + copyHint (ephemeral, no DB write)
-//   8. ExecutionAgent         — generate final reply via OpenAI, weaves in offer hint
-// ─────────────────────────────────────────────────────────────────────────────
-
+/**
+ * handleMessage — POST /api/v1/message
+ * 
+ * Queues the message state into RabbitMQ and awaits the fully processed state
+ * from the LangGraph worker process.
+ */
 export async function handleMessage(
   req: Request,
   res: Response,
@@ -90,61 +49,12 @@ export async function handleMessage(
   };
 
   try {
-    // ── Step 1: MemoryAgent ─────────────────────────────────────────────────
-    reqLog.info('Running MemoryAgent');
-    state = await memoryAgent.process(state);
-    reqLog.info({ historyLength: state.history.length }, 'MemoryAgent complete');
-
-    // ── Step 2: BehaviorAgent ───────────────────────────────────────────────
-    reqLog.info('Running BehaviorAgent');
-    state = await behaviorAgent.process(state);
-    reqLog.info(
-      { intent: state.intent, sentiment: state.sentiment, urgency: state.urgency },
-      'BehaviorAgent complete',
-    );
-
-    // ── Step 3: DigitalTwinAgent ────────────────────────────────────────────
-    reqLog.info('Running DigitalTwinAgent');
-    state = await digitalTwinAgent.process(state);
-    reqLog.info(
-      { buyingFrequency: (state.profile as { buyingFrequency?: number })?.buyingFrequency },
-      'DigitalTwinAgent complete',
-    );
-
-    // ── Step 4: RevenuePredictionAgent ──────────────────────────────────────
-    reqLog.info('Running RevenuePredictionAgent');
-    state = await revenuePredictionAgent.process(state);
-    reqLog.info(
-      {
-        purchaseProbability: state.predictions?.purchaseProbability,
-        expectedOrderValue:  state.predictions?.expectedOrderValue,
-        ltv:                 state.predictions?.ltv,
-      },
-      'RevenuePredictionAgent complete',
-    );
-
-    // ── Step 5: SegmentationAgent ───────────────────────────────────────────
-    reqLog.info('Running SegmentationAgent');
-    state = await segmentationAgent.process(state);
-    reqLog.info({ segment: state.segment }, 'SegmentationAgent complete');
-
-    // ── Step 6: StrategyDecisionAgent ───────────────────────────────────────
-    reqLog.info('Running StrategyDecisionAgent');
-    state = await strategyDecisionAgent.process(state);
-    reqLog.info(
-      { discount: state.strategy?.discount, bundle: state.strategy?.bundle },
-      'StrategyDecisionAgent complete',
-    );
-
-    // ── Step 7: OfferOptimizationAgent ──────────────────────────────────────
-    reqLog.info('Running OfferOptimizationAgent');
-    state = await offerOptimizationAgent.process(state);
-    reqLog.info({ headline: state.offer?.headline }, 'OfferOptimizationAgent complete');
-
-    // ── Step 8: ExecutionAgent ──────────────────────────────────────────────
-    reqLog.info('Running ExecutionAgent');
-    state = await executionAgent.process(state);
-    reqLog.info({ responseLength: state.response?.length }, 'ExecutionAgent complete');
+    reqLog.info('[MessageController] Delegating processing to RabbitMQ Queue');
+    
+    // Publish message state and wait for LangGraph worker processing to finish
+    state = await rabbitmqService.publishAndReceive(state);
+    
+    reqLog.info('[MessageController] Queue processing completed');
 
     // ── Append BOT reply to Redis history ───────────────────────────────────
     if (state.response) {
@@ -163,7 +73,7 @@ export async function handleMessage(
       }
     }
 
-    reqLog.info('Pipeline complete — sending response');
+    reqLog.info('Sending reply to client');
     res.status(200).json({ response: state.response });
   } catch (err) {
     const error = err as Error;
@@ -171,3 +81,4 @@ export async function handleMessage(
     next(err); // forwards to global error handler in app.ts
   }
 }
+

@@ -1,6 +1,8 @@
 import 'dotenv/config';
 import app from './app';
 import redisService from './services/redis.service';
+import rabbitmqService from './services/rabbitmq.service';
+import runAgentGraph from './services/agentGraph';
 
 const PORT: number = parseInt(process.env.PORT ?? '5000', 10);
 const NODE_ENV: string = process.env.NODE_ENV ?? 'development';
@@ -9,6 +11,10 @@ const NODE_ENV: string = process.env.NODE_ENV ?? 'development';
 async function bootstrap() {
   // Connect to Redis before accepting traffic
   await redisService.connect();
+
+  // Connect to RabbitMQ and start background worker
+  await rabbitmqService.initialize();
+  await rabbitmqService.startWorker(runAgentGraph);
 
   const server = app.listen(PORT, () => {
     console.log('─────────────────────────────────────────');
@@ -25,6 +31,7 @@ async function bootstrap() {
     server.close(async () => {
       console.log('[Server] HTTP server closed.');
       await redisService.disconnect();
+      await rabbitmqService.disconnect();
       process.exit(0);
     });
   };
@@ -37,4 +44,5 @@ bootstrap().catch((err) => {
   console.error('[Server] Failed to start:', err);
   process.exit(1);
 });
+
 
