@@ -78,7 +78,7 @@ export async function connect(): Promise<Redis> {
 // Internal helper — get the connected client or throw
 // ─────────────────────────────────────────────────────────────────────────────
 
-function getClient(): Redis {
+export function getClient(): Redis {
   if (!client || client.status !== 'ready') {
     throw new Error('[Redis] Client is not connected. Call connect() first.');
   }
@@ -222,6 +222,7 @@ const redisService = {
   getState,
   setState,
   healthCheck,
+  getClient,
 };
 
 export default redisService;

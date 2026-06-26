@@ -1,29 +1,28 @@
 import { Agent } from './base.agent';
 import type { AgentState } from '../types';
 import type { PrismaClient } from '@prisma/client';
+import { rlAgent } from './reinforcementLearning.agent';
 
 // ─────────────────────────────────────────────────────────────────────────────
-// StrategyDecisionAgent
+// StrategyDecisionAgent  (Phase 2 + Phase 3 RL override)
 //
-// Switches on the customer segment (from SegmentationAgent) and outputs a
-// deterministic strategy: recommended discount, bundle SKUs, reason string,
-// and a follow-up time window.
+// Phase 2: Deterministic rule map from segment → strategy template.
+// Phase 3: Before rule lookup, asks RL agent for the best learned action.
+//          If RL returns a non-null action, it overrides the rule-based result.
 //
-// The strategy is persisted to the Strategy table with applied=false and
-// outcome=null (to be updated by downstream processes when the offer is acted on).
+// The strategy is persisted to the Strategy table and its ID is stored in
+// state.strategy.strategyId for downstream FeedbackAgent use.
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** Hours offset in milliseconds */
 const HOURS_MS = (h: number): number => h * 60 * 60 * 1000;
 
 interface StrategyTemplate {
-  discount:     number;
-  bundle:       string[];
-  reason:       string;
+  discount:      number;
+  bundle:        string[];
+  reason:        string;
   followUpHours: number;
 }
 
-/** Strategy templates keyed by segment name */
 const STRATEGY_MAP: Record<NonNullable<AgentState['segment']>, StrategyTemplate> = {
   'high-value': {
     discount:      5,
@@ -57,12 +56,14 @@ const STRATEGY_MAP: Record<NonNullable<AgentState['segment']>, StrategyTemplate>
   },
 };
 
+/** Map a learned RL action string back to a bundle item list */
+function rlActionToBundle(action: string): string[] {
+  return [action];
+}
+
 export class StrategyDecisionAgent extends Agent {
   private readonly prisma: PrismaClient;
 
-  /**
-   * @param prismaClient - Injected Prisma client instance.
-   */
   constructor(prismaClient: PrismaClient) {
     super('StrategyDecisionAgent');
     this.prisma = prismaClient;
@@ -71,43 +72,56 @@ export class StrategyDecisionAgent extends Agent {
   async process(state: AgentState): Promise<AgentState> {
     this.log(`Running strategy decision for user ${state.userId}`);
 
-    // ── Guards ────────────────────────────────────────────────────────────────
     if (!state.segment) {
-      throw new Error(
-        '[StrategyDecisionAgent] state.segment is missing — SegmentationAgent must run before StrategyDecisionAgent.',
-      );
+      throw new Error('[StrategyDecisionAgent] state.segment is missing — SegmentationAgent must run first.');
     }
     if (!state.predictions) {
-      throw new Error(
-        '[StrategyDecisionAgent] state.predictions is missing — RevenuePredictionAgent must run before StrategyDecisionAgent.',
-      );
+      throw new Error('[StrategyDecisionAgent] state.predictions is missing — RevenuePredictionAgent must run first.');
     }
 
-    // ── Select strategy template for this segment ─────────────────────────────
-    const template = STRATEGY_MAP[state.segment];
-    const { discount, bundle, reason, followUpHours } = template;
+    // ── Phase 3: RL override — check learned policy first ────────────────────
+    const rlAction = await rlAgent.getBestAction(state.segment);
 
-    // ── Compute follow-up time via simple millisecond arithmetic ──────────────
-    const followUpDate   = new Date(Date.now() + HOURS_MS(followUpHours));
-    const followUpIso    = followUpDate.toISOString();
+    let discount:      number;
+    let bundle:        string[];
+    let reason:        string;
+    let followUpHours: number;
+
+    if (rlAction) {
+      // RL agent has learned a policy — use it
+      this.log(`RL override: segment="${state.segment}" → action="${rlAction}"`);
+      const template = STRATEGY_MAP[state.segment]; // still use template for discount/timing
+      discount      = template.discount;
+      bundle        = rlActionToBundle(rlAction);
+      reason        = `RL-learned strategy for segment: ${state.segment} (action: ${rlAction})`;
+      followUpHours = template.followUpHours;
+    } else {
+      // No RL policy yet — fall back to deterministic rule
+      this.log(`No RL policy for "${state.segment}" — using rule-based strategy`);
+      const template = STRATEGY_MAP[state.segment];
+      ({ discount, bundle, reason, followUpHours } = template);
+    }
+
+    const followUpDate = new Date(Date.now() + HOURS_MS(followUpHours));
+    const followUpIso  = followUpDate.toISOString();
 
     this.log(
       `segment="${state.segment}"  discount=${discount}%  ` +
-      `bundle=[${bundle.join(', ')}]  followUp=${followUpIso}`,
+      `bundle=[${bundle.join(', ')}]  followUp=${followUpIso}`
     );
 
     // ── Persist Strategy row ──────────────────────────────────────────────────
-    await this.prisma.strategy.create({
+    const strategyRow = await this.prisma.strategy.create({
       data: {
         userId:            state.userId,
         recommendedAction: { discount, bundle, reason },
-        followUpTime:      followUpDate,   // Date object for Prisma
+        followUpTime:      followUpDate,
         applied:           false,
         outcome:           null,
       },
     });
 
-    this.log('Strategy row written to Postgres');
+    this.log(`Strategy row written (id=${strategyRow.id})`);
 
     return {
       ...state,
@@ -115,7 +129,8 @@ export class StrategyDecisionAgent extends Agent {
         discount,
         bundle,
         reason,
-        followUpTime: followUpIso,  // ISO string in state
+        followUpTime: followUpIso,
+        strategyId:   strategyRow.id,   // Phase 3: expose for FeedbackAgent
       },
     };
   }

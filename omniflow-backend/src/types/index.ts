@@ -52,6 +52,8 @@ export interface AgentState {
     bundle: string[];
     reason: string;
     followUpTime: string | null;
+    /** The DB Strategy row ID — needed by FeedbackAgent */
+    strategyId?: string;
   };
 
   /** Optimised offer from OfferOptimizationAgent (ephemeral — not written to DB) */
@@ -61,4 +63,15 @@ export interface AgentState {
     bundleItems: string[];
     copyHint: string;
   };
+
+  // ── Phase 3 fields ─────────────────────────────────────────────────────────
+
+  /** Competitor pricing / seasonal data from CompetitorIntelligenceAgent */
+  competitor_factors?: {
+    avgCompetitorPrice: number;
+    maxSeasonalFactor: number;
+  };
+
+  /** The channel this message arrived on ("whatsapp" | "api") */
+  channel?: 'whatsapp' | 'api';
 }

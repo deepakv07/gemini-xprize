@@ -163,6 +163,17 @@ class RabbitMQService {
             // Execute the agent pipeline graph
             const finalState = await processor(initialState);
 
+            // ── Phase 3: WhatsApp reply ──────────────────────────────────────
+            if (finalState.channel === 'whatsapp' && finalState.response && finalState.userId) {
+              try {
+                const { default: whatsappService } = await import('../services/whatsapp.service');
+                await whatsappService.sendMessage(finalState.userId, finalState.response);
+                logger.info({ userId: finalState.userId }, '[RabbitMQ Worker] WhatsApp reply sent');
+              } catch (waErr) {
+                logger.warn({ err: (waErr as Error).message }, '[RabbitMQ Worker] WhatsApp send failed (non-fatal)');
+              }
+            }
+
             // Send reply if replyTo is specified
             if (replyTo && correlationId) {
               const replyPayload = Buffer.from(JSON.stringify(finalState));

@@ -1,5 +1,5 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// OmniFlow Backend — Prisma Schema
+// OmniFlow Backend — Prisma Schema  (Phase 1 + 2 + 3 + 4)
 // ─────────────────────────────────────────────────────────────────────────────
 
 generator client {
@@ -10,14 +10,44 @@ datasource db {
   provider = "postgresql"
   url      = env("DATABASE_URL")
 }
-// ─── Enums ───────────────────────────────────────────────────────────────────
+
+// ─── Enums ────────────────────────────────────────────────────────────────────
 
 enum MessageSender {
   USER
   BOT
 }
 
-// ─── Models ──────────────────────────────────────────────────────────────────
+/// Phase 3 — Feedback outcome for RL training
+enum FeedbackOutcome {
+  PURCHASE
+  REJECT
+  IGNORE
+}
+
+/// Phase 4 — Subscription plan tiers
+enum Plan {
+  FREE
+  PRO
+  ENTERPRISE
+}
+
+// ─── Phase 4: Business / Tenant ───────────────────────────────────────────────
+
+/// A registered business / tenant on the OmniFlow platform.
+model Business {
+  id           String   @id @default(uuid()) @db.Uuid
+  name         String
+  email        String   @unique
+  passwordHash String
+  apiKey       String   @unique @default(uuid()) @db.Uuid
+  plan         Plan     @default(FREE)
+  createdAt    DateTime @default(now())
+
+  @@map("businesses")
+}
+
+// ─── Core Customer Models ─────────────────────────────────────────────────────
 
 /// Represents a customer / end-user who interacts via WhatsApp or other channels.
 model User {
@@ -33,18 +63,19 @@ model User {
   customerProfile CustomerProfile?
   predictions     Prediction[]
   strategies      Strategy[]
+  feedbacks       Feedback[]
 
   @@map("users")
 }
 
 /// A single message exchange in a conversation thread.
 model Conversation {
-  id        String        @id @default(uuid()) @db.Uuid
-  userId    String        @db.Uuid
-  businessId String       @db.Uuid
-  message   String
-  sender    MessageSender
-  timestamp DateTime      @default(now())
+  id         String        @id @default(uuid()) @db.Uuid
+  userId     String        @db.Uuid
+  businessId String        @db.Uuid
+  message    String
+  sender     MessageSender
+  timestamp  DateTime      @default(now())
 
   // AI-enriched metadata (nullable — populated after inference)
   intent    String?
@@ -64,13 +95,13 @@ model Conversation {
 model CustomerProfile {
   userId String @id @db.Uuid
 
-  budgetSensitivity    Float  @default(0.5)
-  buyingFrequency      Float  @default(0.5)
-  preferredProducts    Json   @default("[]")
-  communicationStyle   String @default("neutral")
-  responseSpeed        Float  @default(0.5)
-  lifetimeValue        Float  @default(0)
-  lastUpdated          DateTime @default(now()) @updatedAt
+  budgetSensitivity  Float    @default(0.5)
+  buyingFrequency    Float    @default(0.5)
+  preferredProducts  Json     @default("[]")
+  communicationStyle String   @default("neutral")
+  responseSpeed      Float    @default(0.5)
+  lifetimeValue      Float    @default(0)
+  lastUpdated        DateTime @default(now()) @updatedAt
 
   // Relations
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -81,13 +112,13 @@ model CustomerProfile {
 /// ML-predicted purchase probability and order value for a user at a point in time.
 /// The segment field is initially null and filled by SegmentationAgent.
 model Prediction {
-  id                   String   @id @default(uuid()) @db.Uuid
-  userId               String   @db.Uuid
-  purchaseProbability  Float
-  expectedOrderValue   Float
-  ltv                  Float
-  segment              String?  // filled by SegmentationAgent after creation
-  timestamp            DateTime @default(now())
+  id                  String   @id @default(uuid()) @db.Uuid
+  userId              String   @db.Uuid
+  purchaseProbability Float
+  expectedOrderValue  Float
+  ltv                 Float
+  segment             String?  // filled by SegmentationAgent after creation
+  timestamp           DateTime @default(now())
 
   // Relations
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -98,20 +129,68 @@ model Prediction {
 }
 
 /// Strategy recommended for a user based on their segment.
-/// Applied and outcome fields are updated by downstream processes.
+/// Applied and outcome fields are updated by FeedbackAgent.
 model Strategy {
-  id                String   @id @default(uuid()) @db.Uuid
-  userId            String   @db.Uuid
-  recommendedAction Json     // shape: { discount: number, bundle: string[], reason: string }
+  id                String    @id @default(uuid()) @db.Uuid
+  userId            String    @db.Uuid
+  recommendedAction Json      // shape: { discount: number, bundle: string[], reason: string }
   followUpTime      DateTime?
-  applied           Boolean  @default(false)
+  applied           Boolean   @default(false)
   outcome           String?
-  timestamp         DateTime @default(now())
+  timestamp         DateTime  @default(now())
 
   // Relations
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user      User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  feedbacks Feedback[]
 
   @@index([userId])
   @@index([timestamp])
   @@map("strategies")
+}
+
+// ─── Phase 3: Feedback + RL + KnowledgeGraph + Competitor ────────────────────
+
+/// Records the outcome of every AI strategy — used for RL training.
+model Feedback {
+  id          String          @id @default(uuid()) @db.Uuid
+  strategyId  String          @db.Uuid
+  userId      String          @db.Uuid
+  outcome     FeedbackOutcome
+  rewardValue Float           // +1 PURCHASE, 0 IGNORE, -1 REJECT
+  recordedAt  DateTime        @default(now())
+
+  // Relations
+  strategy Strategy @relation(fields: [strategyId], references: [id], onDelete: Cascade)
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([strategyId])
+  @@index([userId])
+  @@map("feedbacks")
+}
+
+/// Vector embedding triples for the KnowledgeGraph (Pinecone-backed).
+model KnowledgeGraph {
+  id          String   @id @default(uuid()) @db.Uuid
+  subject     String
+  relation    String
+  object      String
+  embeddingId String   // Pinecone vector ID
+  createdAt   DateTime @default(now())
+
+  @@index([subject])
+  @@map("knowledge_graph")
+}
+
+/// Competitor pricing + seasonal factor data per business.
+model CompetitorData {
+  id              String   @id @default(uuid()) @db.Uuid
+  businessId      String   @db.Uuid
+  product         String
+  competitorPrice Float
+  seasonalFactor  Float    @default(1.0)
+  updatedAt       DateTime @default(now()) @updatedAt
+
+  @@unique([businessId, product])
+  @@index([businessId])
+  @@map("competitor_data")
 }

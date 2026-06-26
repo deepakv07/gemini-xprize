@@ -3,6 +3,15 @@ import type { AgentState } from '../types';
 import type { RedisMessage } from '../services/redis.service';
 import type { PrismaClient } from '@prisma/client';
 import { MessageSender } from '../models';
+import { v5 as uuidv5, validate as uuidValidate } from 'uuid';
+
+// Fixed namespace for deterministic userId → UUID conversion
+const OMNIFLOW_NS = '6ba7b810-9dad-11d1-80b4-00c04fd430c8'; // UUID v5 URL namespace
+
+/** Converts any string to a valid UUID. If already a UUID, returns as-is. */
+function toUuid(id: string): string {
+  return uuidValidate(id) ? id : uuidv5(id, OMNIFLOW_NS);
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // MemoryAgent
@@ -30,12 +39,15 @@ export class MemoryAgent extends Agent {
   }
 
   async process(state: AgentState): Promise<AgentState> {
-    this.log(`Loading memory for user ${state.userId}`);
+    // Normalise userId — Postgres requires a valid UUID
+    const normalizedUserId = toUuid(state.userId);
+    const normalizedState  = { ...state, userId: normalizedUserId };
+    this.log(`Loading memory for user ${state.userId} (uuid: ${normalizedUserId})`);
 
     // ── 1. Fetch history from Redis ─────────────────────────────────────────
     let history: RedisMessage[] = [];
     try {
-      history = await this.getHistory(state.userId);
+      history = await this.getHistory(normalizedUserId);
       this.log(`Loaded ${history.length} messages from Redis`);
     } catch (err) {
       this.error('Failed to load Redis history — proceeding with empty history', err);
@@ -45,10 +57,10 @@ export class MemoryAgent extends Agent {
     try {
       // Upsert the user to satisfy foreign key constraints for the demo
       await this.prisma.user.upsert({
-        where: { id: state.userId },
+        where: { id: normalizedUserId },
         create: {
-          id: state.userId,
-          businessId: state.businessId,
+          id: normalizedUserId,
+          businessId: normalizedState.businessId,
           phoneNumber: `demo-${state.userId}`,
           name: 'Demo User',
         },
@@ -57,9 +69,9 @@ export class MemoryAgent extends Agent {
 
       await this.prisma.conversation.create({
         data: {
-          userId: state.userId,
-          businessId: state.businessId,
-          message: state.message,
+          userId: normalizedUserId,
+          businessId: normalizedState.businessId,
+          message: normalizedState.message,
           sender: MessageSender.USER,
           // intent/sentiment/urgency are populated by BehaviorAgent which runs later;
           // they can be updated in a follow-up call if needed.
@@ -71,6 +83,6 @@ export class MemoryAgent extends Agent {
       this.error('Failed to write conversation to Postgres', err);
     }
 
-    return { ...state, history };
+    return { ...normalizedState, history };
   }
 }
